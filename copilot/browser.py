@@ -19,24 +19,33 @@ It exposes the same ``create_completion(prompt, stream=...)`` generator API as
 PROTOCOL ASSUMPTIONS (verify at runtime against a live session):
   * Conversation create:  POST /c/api/conversations  -> {"id": "..."}
   * Chat socket:          wss://copilot.microsoft.com/c/api/chat?api-version=2
-                          (with &accessToken=<token> when signed in)
+                          &clientSessionId=<uuid> (with &accessToken=<token> when
+                          signed in)
+  * Handshake:            send SET_OPTIONS_FRAME then CONSENTS_FRAME before the
+                          first send, or the backend returns invalid-event
   * Send frame:           {"event":"send","conversationId":...,
-                           "content":[{"type":"text","text":...}],"mode":"chat"}
+                           "content":[{"type":"text","text":...}],
+                           "mode":"smart","context":{}}
   * Stream frames:        {"event":"appendText","text":...}, then {"event":"done"}
-These mirror the captured protocol in ``client.py``. If Microsoft changes them,
-adjust the JS templates below.
+The wire shapes are the single source of truth in :mod:`copilot.protocol`; these
+JS templates just replay them. Recapture with ``tests/diagnostic.py`` if Microsoft
+changes the protocol.
 """
 
 from __future__ import annotations
 
 import json
 import time
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Generator, Optional
+from urllib.parse import quote
 
 from playwright.sync_api import sync_playwright, Error as PlaywrightError
 
 from .auth import DEFAULT_AUTH_FILE, DEFAULT_PROFILE_DIR
+from .protocol import CHAT_WEBSOCKET_URL, CONSENTS_FRAME, SET_OPTIONS_FRAME
 
 COPILOT_URL = "https://copilot.microsoft.com/"
 
@@ -92,20 +101,22 @@ _FIND_TOKEN_JS = """
 # Open the chat WebSocket and wire handlers that push into a window-scoped
 # buffer. Returns immediately; messages accumulate while Python polls.
 _START_STREAM_JS = """
-([conversationId, accessToken, prompt]) => {
+([url, conversationId, prompt, prelude]) => {
   const state = {queue: [], done: false, error: null, started: false};
   window.__copilot = state;
-  let url = 'wss://copilot.microsoft.com/c/api/chat?api-version=2';
-  if (accessToken) url += '&accessToken=' + encodeURIComponent(accessToken);
   let ws;
   try { ws = new WebSocket(url); } catch (e) { state.error = 'ws-init: ' + e; state.done = true; return false; }
   window.__copilotWs = ws;
   ws.onopen = () => {
+    // Initialise the session (setOptions, reportLocalConsents) before sending,
+    // or the backend rejects `send` with invalid-event.
+    for (const frame of prelude) ws.send(JSON.stringify(frame));
     ws.send(JSON.stringify({
       event: 'send',
       conversationId: conversationId,
       content: [{type: 'text', text: prompt}],
-      mode: 'chat'
+      mode: 'smart',
+      context: {}
     }));
   };
   ws.onmessage = (ev) => {
@@ -167,6 +178,7 @@ class BrowserCopilot:
         self._pw = None
         self._context = None
         self._page = None
+        self._login_log_fh = None
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -226,7 +238,11 @@ class BrowserCopilot:
         return "available in your region" in (text or "").lower()
 
     def close(self) -> None:
-        for attr, closer in (("_context", lambda c: c.close()), ("_pw", lambda p: p.stop())):
+        for attr, closer in (
+            ("_context", lambda c: c.close()),
+            ("_pw", lambda p: p.stop()),
+            ("_login_log_fh", lambda f: f.close()),
+        ):
             obj = getattr(self, attr, None)
             if obj is not None:
                 try:
@@ -244,34 +260,115 @@ class BrowserCopilot:
 
     # -- auth ---------------------------------------------------------------
 
-    def login(self, path: str = DEFAULT_AUTH_FILE) -> dict:
+    def login(self, path: str = DEFAULT_AUTH_FILE, timeout: int = 300) -> dict:
         """Open a visible window for interactive Microsoft sign-in.
 
-        Blocks until you press Enter in the console. The session is persisted in
-        ``profile_dir`` (and snapshotted to ``path``), so subsequent headless
-        runs reuse it. Returns the captured auth dict.
+        Auto-detects success — the Copilot chat access token appearing in the
+        page, the same signal :mod:`copilot.auth` uses — then snapshots the
+        session and closes the browser by itself. No key-press needed. Every step
+        is appended to ``<session>/login.log`` so a failed sign-in is diagnosable.
+        ``timeout`` bounds the wait before giving up and snapshotting whatever
+        state exists. The session persists in ``profile_dir`` for headless reuse.
         """
         self.close()
         self.start(headless=False)
+
+        log = self._open_login_log(Path(path).resolve().parent / "login.log")
+        log(f"login started; browser open at {COPILOT_URL}")
+        self._mirror_page_events(log)
+
         print(
             "\nA browser window is open at copilot.microsoft.com.\n"
-            "Sign in (or just solve any Cloudflare check for anonymous use),\n"
-            "then return here and press Enter to save the session..."
+            "Sign in (and pass any 'verify you're human' check).\n"
+            "It closes by itself once sign-in is detected — no need to press Enter.\n"
         )
-        try:
-            input()
-        except EOFError:
-            pass
-        # Snapshot fresh auth so the headless curl_cffi path works immediately.
+
+        # Poll for the signed-in chat token; bail early if the user closes the
+        # window or the timeout elapses.
+        detected = False
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._window_closed():
+                log("browser window closed before sign-in was detected")
+                break
+            try:
+                token = self.access_token()
+            except PlaywrightError:
+                token = None
+            if token:
+                log("chat access token detected — sign-in successful")
+                detected = True
+                break
+            try:
+                self._page.wait_for_timeout(1500)
+            except PlaywrightError:
+                break
+
+        if not detected:
+            log(f"no chat access token within {timeout}s; snapshotting current state")
+            print("Sign-in not auto-detected; saving whatever session state exists.")
+
+        # Let cookies/token settle, then snapshot for the headless curl_cffi path.
         auth: dict = {}
         try:
+            if detected and not self._window_closed():
+                self._page.wait_for_timeout(800)
             auth = self.export_auth(path=path, stamp=time.time())
+            log(f"auth snapshot saved to {path} (access_token={'yes' if auth.get('access_token') else 'no'})")
             print(f"Auth snapshot saved to {path}")
         except Exception as exc:
+            log(f"could not snapshot auth: {exc}")
             print(f"(could not snapshot auth: {exc})")
+
+        log("closing browser")
         self.close()
         print(f"Session saved to {self.profile_dir}")
         return auth
+
+    def _open_login_log(self, log_path: Path):
+        """Return a best-effort timestamped append-logger to ``log_path``.
+
+        The handle is parked on the context so :meth:`close` can release it; if the
+        file can't be opened, the returned logger is a silent no-op.
+        """
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._login_log_fh = log_path.open("a", encoding="utf-8")
+        except OSError:
+            self._login_log_fh = None
+
+        def log(message: str) -> None:
+            fh = self._login_log_fh
+            if fh is None:
+                return
+            try:
+                fh.write(f"{datetime.now(timezone.utc).isoformat()}\t{message}\n")
+                fh.flush()
+            except Exception:
+                pass
+
+        return log
+
+    def _mirror_page_events(self, log) -> None:
+        """Stream main-frame navigations and console errors into the login log."""
+        try:
+            self._page.on(
+                "framenavigated",
+                lambda fr: fr == self._page.main_frame and log(f"navigated: {fr.url}"),
+            )
+            self._page.on(
+                "console",
+                lambda m: m.type == "error" and log(f"console.error: {m.text}"),
+            )
+        except PlaywrightError:
+            pass
+
+    def _window_closed(self) -> bool:
+        """True if the page/context is gone (e.g. the user closed the window)."""
+        try:
+            return self._page is None or self._page.is_closed()
+        except Exception:
+            return True
 
     def access_token(self) -> Optional[str]:
         """Return the page's MSAL access token, or ``None`` if anonymous."""
@@ -347,7 +444,11 @@ class BrowserCopilot:
 
         token = self._page.evaluate(_FIND_TOKEN_JS)
 
-        started_ok = self._page.evaluate(_START_STREAM_JS, [conversation_id, token, prompt])
+        ws_url = f"{CHAT_WEBSOCKET_URL}&clientSessionId={uuid.uuid4()}"
+        if token:
+            ws_url += f"&accessToken={quote(token)}"
+        prelude = [SET_OPTIONS_FRAME, CONSENTS_FRAME]
+        started_ok = self._page.evaluate(_START_STREAM_JS, [ws_url, conversation_id, prompt, prelude])
         if started_ok is False:
             state = self._page.evaluate(_POLL_JS)
             raise ConnectionError(f"WebSocket failed to start: {state.get('error')}")

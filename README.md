@@ -73,9 +73,9 @@ playwright install chromium
 python -m copilot login
 ```
 
-That's it. Your session is saved under `session/` (git-ignored, never shared) and reused on every run.
+The browser **closes by itself** once sign-in is detected — you don't need to press Enter or close it manually. The steps are logged to `session/login.log` if anything goes wrong. That's it: your session is saved under `session/` (git-ignored, never shared) and reused on every run.
 
-> 💡 You can even skip step 4: the **first** time you call `chat()` or start the server, it opens the sign-in browser for you automatically.
+> 💡 You can even skip step 3: the **first** time you call `chat()` or start the server, it opens the sign-in browser for you automatically.
 
 ---
 
@@ -261,7 +261,7 @@ add a few retries yourself.
 | [copilot/](copilot/) | The core library: `CopilotClient`, auth, browser sign-in, HTTP driver |
 | [server/](server/) | The FastAPI OpenAI-compatible server |
 | [examples/](examples/) | Runnable examples for every feature ([examples/README.md](examples/README.md)) |
-| [tests/](tests/) | Test scripts, including the concurrency stress test ([tests/stress.py](tests/stress.py)) |
+| [tests/](tests/) | Test scripts: the concurrency stress test ([tests/stress.py](tests/stress.py)) and the diagnostic/captcha-fix tool ([tests/diagnostic.py](tests/diagnostic.py)) |
 | [app.py](app.py) | Starts the server |
 
 ---
@@ -278,8 +278,37 @@ add a few retries yourself.
 
 ## Troubleshooting
 
-**`RuntimeError: Copilot error: invalid-event` (or the chat hangs) on a server/VPS.**
-On datacenter IPs Cloudflare withholds bot-clearance, so the chat socket stalls on an empty challenge sometimes. **Fix it manually:** on that machine, open [copilot.microsoft.com](https://copilot.microsoft.com) in a browser and pass the "verify you're human" check once; that sets a `cf_clearance` cookie which the saved session reuses. Re-do it if it expires, or route the server's traffic through a residential connection (e.g. a home-PC exit node).
+**Hit an error? Run the diagnostic first — it both *fixes* and *logs*.**
+
+```bash
+python tests/diagnostic.py                # browser capture + captcha fix + report
+python tests/diagnostic.py --report-only  # headless/VPS: report only, no browser
+```
+
+The default run opens your signed-in browser and asks you to send one short
+message. That single action does two things:
+
+- **Fixes captcha:** it drives a *real* browser on the same `session/profile/`
+  the bridge uses, so passing any "verify you're human" check earns a fresh
+  `cf_clearance` cookie. When the turn completes the tool snapshots that session
+  (cookies + token) into `session/token.json`, so the pure-HTTP driver adopts
+  the clearance immediately.
+- **Captures the protocol** to `session/ws_capture.log`. A clean turn goes
+  `setOptions` → `send` → `appendText…` → `done`; a `{"event":"challenge",
+  "method":"cloudflare",…}` frame means Cloudflare gated you (now cleared).
+
+It also writes `session/diagnostic_report.txt` — environment, the *shape* of your
+session (cookie names + token length, never the values), a live chat probe, and
+redacted log tails. **Both files are safe to share:** access tokens, cookies,
+OAuth codes, and emails are redacted before anything is written. Attach
+`diagnostic_report.txt` to a GitHub issue (skim it first) and the cause is
+usually obvious.
+
+> On a headless **server/VPS** you can't open the browser, so the captcha fix
+> isn't available there — pass `--report-only`, then do the clearance step on a
+> machine with a display (or route traffic through a residential connection,
+> e.g. a home-PC exit node) since datacenter IPs are where Cloudflare withholds
+> clearance and you see `RuntimeError: Copilot error: invalid-event`.
 
 ---
 

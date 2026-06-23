@@ -8,6 +8,7 @@ See :mod:`copilot.browser` for the Playwright-backed fallback.
 
 import json
 import time
+import uuid
 from select import select
 from typing import Dict, Optional
 from urllib.parse import quote
@@ -23,6 +24,7 @@ _CURL_SOCKET_BAD = -1
 
 from .challenges import solve_copilot_challenge, solve_hashcash
 from .models import AbstractProvider, Conversation, ImageResponse, ImageType
+from .protocol import CHAT_WEBSOCKET_URL, CONSENTS_FRAME, SET_OPTIONS_FRAME
 from .utils import drain_json, is_accepted_format, raise_for_status, to_bytes
 
 
@@ -33,7 +35,7 @@ class Copilot(AbstractProvider):
     supports_stream = True
     default_model = "Copilot"
     needs_auth = False  # consumer chat works anonymously (cookies only)
-    websocket_url = "wss://copilot.microsoft.com/c/api/chat?api-version=2"
+    websocket_url = CHAT_WEBSOCKET_URL
     conversation_url = f"{url}/c/api/conversations"
 
     def create_completion(
@@ -87,7 +89,11 @@ class Copilot(AbstractProvider):
         #     wrong-audience token 401s the WS upgrade, while *no* token makes the
         #     chat backend treat the session as anonymous -> chat-service-
         #     unavailable in geo-restricted regions (e.g. India).
-        websocket_url = self.websocket_url
+        # Mirror the real client's URL shape: api-version, then a fresh
+        # per-connection clientSessionId, then the access token. The current chat
+        # backend expects clientSessionId; omitting it is one trigger for an
+        # `invalid-event` rejection.
+        websocket_url = f"{self.websocket_url}&clientSessionId={uuid.uuid4()}"
         if access_token:
             websocket_url = f"{websocket_url}&accessToken={quote(access_token)}"
 
@@ -126,10 +132,16 @@ class Copilot(AbstractProvider):
                 "event": "send",
                 "conversationId": conversation_id,
                 "content": [*images, {"type": "text", "text": prompt}],
-                "mode": "chat",
+                "mode": "smart",
+                "context": {},
             }).encode()
 
             wss = session.ws_connect(websocket_url)
+            # Initialise the session before sending: setOptions then
+            # reportLocalConsents. A `send` issued first is rejected with
+            # `invalid-event` (see the handshake constants above).
+            wss.send(json.dumps(SET_OPTIONS_FRAME).encode(), CurlWsFlag.TEXT)
+            wss.send(json.dumps(CONSENTS_FRAME).encode(), CurlWsFlag.TEXT)
             wss.send(send_frame, CurlWsFlag.TEXT)
             yield from self._read_stream(wss, send_frame, timeout)
 
