@@ -32,20 +32,17 @@ def app(host=None, port=None) -> None:
     """
     import uvicorn
 
-    from copilot.auth import load_auth
-
     if host is None:
         host = os.environ.get("HOST", "127.0.0.1")
     if port is None:
         port = int(os.environ.get("PORT", "8000"))
 
-    # Ensure a signed-in Copilot session exists before we start serving. On the
-    # very first run this triggers the interactive browser sign-in (instead of
-    # letting the first HTTP request fail), then caches it for reuse.
-    try:
-        load_auth()
-    except Exception as exc:
-        print(f"Warning: could not establish a Copilot session: {exc}")
+    # No auth pre-warm at startup: it used to spin a headless browser (10-60s) when
+    # no consumer session existed, delaying the port bind so clients hit
+    # ECONNREFUSED while the server "started". Both drivers load their session
+    # lazily on the first matching request instead, so the server binds instantly.
+    #   `copilot`      -> sign in once: `python -m copilot login`
+    #   `copilot-work` -> bootstrap once: `python -m copilot.m365.bootstrap`
 
     print(f"Copilot OpenAI-compatible API on http://{host}:{port}  (POST /v1/chat/completions)")
     uvicorn.run(_api, host=host, port=port)
