@@ -25,6 +25,7 @@ You sign in once in a browser with your Microsoft **or Google** account; your se
 - [Run with Docker (optional)](#run-with-docker-optional)
 - [Usage 1: In Python (no server)](#usage-1-in-python-no-server)
 - [Usage 2: As an OpenAI-compatible server](#usage-2-as-an-openai-compatible-server)
+- [Usage 3: Work / school account + coding agents](#usage-3-work--school-account-microsoft-365-copilot--coding-agents)
 - [Command line](#command-line)
 - [Concurrency & stress test](#concurrency--stress-test)
 - [Rate limiting](#rate-limiting)
@@ -183,11 +184,54 @@ curl http://localhost:8000/v1/chat/completions \
 | Method | Path | Description |
 | --- | --- | --- |
 | `POST` | `/v1/chat/completions` | Chat (supports `"stream": true` and an optional `"conversation_id"`) |
-| `GET`  | `/v1/models` | Lists the single `copilot` model |
+| `GET`  | `/v1/models` | Lists the `copilot` (personal) and `copilot-work` (Microsoft 365) models |
 
 > Change the address with env vars: `HOST=0.0.0.0 PORT=8080 python app.py`, or run `uvicorn server.api:app --host 0.0.0.0 --port 8080`.
 
 👉 More: [examples/04_server_http.py](examples/04_server_http.py), [05_server_stream.py](examples/05_server_stream.py), [06_server_openai_sdk.py](examples/06_server_openai_sdk.py)
+
+---
+
+## Usage 3: Work / school account (Microsoft 365 Copilot) + coding agents
+
+Personal Microsoft accounts use consumer Copilot (the `copilot` model above). A **work or school (Entra ID) account** is served by the enterprise **Microsoft 365 Copilot** — a different backend ("Cowork", running on Claude Fable 5) that this project speaks through the **`copilot-work`** model. Everything is headless after a one-time sign-in.
+
+**1. Bootstrap once** — interactive sign-in that captures a refresh token; every call after this is headless:
+
+```powershell
+python -m copilot.m365.bootstrap
+# a browser opens — sign in with your WORK account, wait for the chat to load, it closes itself
+```
+
+**2. Start the server:**
+
+```powershell
+python app.py
+# -> Copilot OpenAI-compatible API on http://127.0.0.1:8000
+```
+
+**3a. Run it as a coding agent** with [OpenClaude](https://github.com/Gitlawb/openclaude) — the bundled launcher wires everything up and opens OpenClaude in your workspace with local tools enabled:
+
+```powershell
+.\work-chat.ps1 -Workspace C:\your\work\directory
+```
+
+**3b. Or point any OpenAI-compatible agent at it manually:**
+
+```powershell
+$env:CLAUDE_CODE_USE_OPENAI=1
+$env:OPENAI_BASE_URL="http://127.0.0.1:8000/v1"
+$env:OPENAI_API_KEY="local"
+$env:OPENAI_MODEL="copilot-work"
+$env:CLAUDE_CODE_DISABLE_AUTO_MEMORY=1
+$env:CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1
+$env:API_TIMEOUT_MS="600000"
+openclaude --dangerously-skip-permissions
+```
+
+Tokens refresh automatically; re-run the bootstrap only if the refresh token dies (long inactivity, password change, or an admin revocation).
+
+> **Notes.** Work turns are slow — ~20–60s each (the Cowork backend, not the bridge), and the server serializes upstream calls, so give agent clients a long request timeout (`API_TIMEOUT_MS`). The title-generation meta-call is answered locally to avoid wasting a turn. Requires an M365 Copilot–licensed tenant that permits token-based access; some tenants block non-interactive tokens via conditional access.
 
 ---
 
