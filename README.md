@@ -376,10 +376,10 @@ Released under the [MIT License](LICENSE). As this is an unofficial project, you
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=sums001%2FWindows-Copilot-API&type=timeline&legend=top-left">
+<a href="https://star-history.dera.page/#sums001/Windows-Copilot-API&type=timeline&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=sums001/Windows-Copilot-API&type=timeline&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=sums001/Windows-Copilot-API&type=timeline&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=sums001/Windows-Copilot-API&type=timeline&legend=top-left" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=sums001/Windows-Copilot-API&type=timeline&theme=dark&legend=top-left" />
+    <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=sums001/Windows-Copilot-API&type=timeline&legend=top-left" />
+    <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=sums001/Windows-Copilot-API&type=timeline&legend=top-left" />
  </picture>
 </a>
