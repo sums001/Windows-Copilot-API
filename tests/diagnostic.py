@@ -2,12 +2,10 @@
 
 One run does two jobs and writes two files under ``session/``:
 
-  * **Fix + capture** (interactive): opens your signed-in browser; you send ONE
-    message in the Copilot UI. That captures the live chat protocol to
-    ``session/ws_capture.log`` AND, because it drives a real browser on the
-    shared profile, passes any Cloudflare/captcha check — refreshing the
-    ``cf_clearance`` cookie the pure-HTTP driver reuses. So watching the protocol
-    and clearing the captcha are the same action.
+  * **Capture** (interactive): opens a browser on the shared profile at
+    copilot.com; you send ONE message in the Copilot UI. That captures the live
+    chat protocol to ``session/ws_capture.log`` — what's needed to follow a
+    protocol change in :mod:`copilot.protocol`.
   * **Log** (always): writes a redacted, shareable report to
     ``session/diagnostic_report.txt`` — environment, the *shape* of your saved
     session (never the secrets), a live chat probe, and redacted log tails.
@@ -45,15 +43,12 @@ LOGIN_LOG = SESSION_DIR / "login.log"
 WS_LOG = SESSION_DIR / "ws_capture.log"
 REPORT = SESSION_DIR / "diagnostic_report.txt"
 
-COPILOT_URL = "https://copilot.microsoft.com/"
-CHAT_HINT = "/c/api/chat"  # the chat socket; other sockets are telemetry noise
+COPILOT_URL = "https://copilot.com/"
+CHAT_HINT = "/m365Copilot/Chathub/"  # the chat socket; other sockets are telemetry noise
 
 # Packages whose versions matter for reproducing chat/auth issues.
 _PACKAGES = ["curl_cffi", "playwright", "fastapi", "uvicorn", "pydantic", "websockets"]
 
-# Cookies that matter for the signed-in + Cloudflare paths; we report whether
-# each is present, never its value.
-_KEY_COOKIES = ["cf_clearance", "__Secure-1PSID", "MUID", "_U", "ANON"]
 
 _LOG_TAIL_LINES = 40       # trailing log lines to include (redacted)
 _CAPTURE_TICKS = 600       # 600 * 500ms = 5 min ceiling on the browser capture
@@ -158,54 +153,19 @@ def session_section(r: Report) -> None:
     saved_at = data.get("saved_at", 0) or 0
     age = time.time() - saved_at if saved_at else None
     token = data.get("access_token")
-    cookies = data.get("cookies") or {}
+    left = (data.get("expires_at") or 0) - time.time()
 
     r.line("token.json  : present")
     r.line(f"  saved_at  : {age:.0f}s ago" if age is not None else "  saved_at  : unknown")
     # Report presence + length only — never the token itself.
-    r.line(f"  access_token : {'yes (len ' + str(len(token)) + ')' if token else 'NO — anonymous/expired'}")
-    r.line(f"  cookies   : {len(cookies)} total")
-    for name in _KEY_COOKIES:
-        r.line(f"    {name:<16}: {'present' if name in cookies else 'absent'}")
-    if "cf_clearance" not in cookies:
-        r.line("  ^ cf_clearance absent: likely Cloudflare/captcha gating on this network.")
+    r.line(f"  access_token : {'yes (len ' + str(len(token)) + ')' if token else 'NO'}"
+           + (f", expires in {left / 60:.0f} min" if token else ""))
+    r.line(f"  refresh_token : {'yes' if data.get('refresh_token') else 'NO — re-run login'}")
+    r.line(f"  account oid   : {'yes' if data.get('oid') else 'NO — re-run login'}")
 
 
-def _snapshot_auth(ctx, page) -> bool:
-    """Write a fresh token.json straight from the live capture browser.
-
-    Reading the cookies (incl. the just-earned ``cf_clearance``) + MSAL token
-    from the *open* capture context avoids spawning a second browser — which
-    would race the capture browser for the profile lock and fall through to an
-    interactive sign-in. Returns True if a token was captured and saved.
-    """
-    from copilot.browser import _FIND_TOKEN_JS
-
-    try:
-        token = page.evaluate(_FIND_TOKEN_JS)
-    except Exception:  # noqa: BLE001
-        token = None
-    if not token:
-        return False
-    try:
-        raw = ctx.cookies()
-    except Exception:  # noqa: BLE001
-        return False
-    cookies = {c["name"]: c["value"] for c in raw if "microsoft.com" in c.get("domain", "")}
-    TOKEN_FILE.write_text(
-        json.dumps({"cookies": cookies, "access_token": token, "saved_at": time.time()}, indent=2),
-        encoding="utf-8",
-    )
-    return True
-
-
-def browser_capture(r: Report) -> bool:
-    """Open the real browser, sniff the chat socket (redacted) to ws_capture.log.
-
-    Returns True if a completed turn let us snapshot a fresh signed-in session
-    (cookies incl. cf_clearance + token) into token.json — i.e. the captcha fix
-    was adopted for the pure-HTTP path.
-    """
+def browser_capture(r: Report) -> None:
+    """Open the real browser, sniff the chat socket (redacted) to ws_capture.log."""
     r.section("Live protocol capture (browser)")
     try:
         from playwright.sync_api import sync_playwright
@@ -213,10 +173,10 @@ def browser_capture(r: Report) -> bool:
         from copilot.auth import DEFAULT_PROFILE_DIR
     except Exception as e:  # noqa: BLE001
         r.line(f"skipped — Playwright unavailable: {type(e).__name__}: {e}")
-        return False
+        return
 
     summary = {"chat_open": False, "challenge": None, "append": False,
-               "done": False, "frames": 0, "refreshed": False}
+               "done": False, "frames": 0}
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
     sink = WS_LOG.open("w", encoding="utf-8")
 
@@ -253,12 +213,9 @@ def browser_capture(r: Report) -> bool:
                 def on_recv(*a) -> None:
                     text = write("[RECV]", a[0] if a else b"")
                     summary["frames"] += 1
-                    if '"event":"challenge"' in text:
-                        m = re.search(r'"method"\s*:\s*"([^"]+)"', text)
-                        summary["challenge"] = m.group(1) if m else "unknown"
-                    if '"event":"appendText"' in text:
+                    if '"writeAtCursor"' in text:
                         summary["append"] = True
-                    if '"event":"done"' in text:
+                    if re.search(r'"type"\s*:\s*3\b', text):
                         summary["done"] = True
 
                 ws.on("framesent", lambda *a: write("[SENT]", a[0] if a else b""))
@@ -273,11 +230,6 @@ def browser_capture(r: Report) -> bool:
                 while not page.is_closed() and ticks > 0:
                     page.wait_for_timeout(500)
                     ticks -= 1
-                    # Once a turn completes, snapshot auth from THIS browser while
-                    # it's still open (captures the refreshed cf_clearance without
-                    # racing a second browser for the profile lock).
-                    if summary["done"] and not summary["refreshed"]:
-                        summary["refreshed"] = _snapshot_auth(ctx, page)
             except Exception:
                 pass  # window/context torn down by the close
             sink.close()
@@ -291,31 +243,19 @@ def browser_capture(r: Report) -> bool:
         r.line("capture failed (traceback redacted):")
         for tb in redact(traceback.format_exc()).splitlines():
             r.line(f"  {tb}")
-        return False
+        return
 
     # Summarise what we saw — this is the gold for captcha/protocol diagnosis.
     r.line(f"ws_capture.log written: {summary['frames']} frames (tokens redacted)")
-    if summary["challenge"]:
-        r.line(f"CHALLENGE frame seen: method={summary['challenge']!r}")
-        if summary["challenge"] == "cloudflare":
-            r.line("  -> Cloudflare/Turnstile gated this turn. Passing the human check in")
-            r.line("     the browser just refreshed cf_clearance on your profile (the fix).")
-    elif summary["chat_open"]:
+    if summary["chat_open"]:
         states = [k for k in ("append", "done") if summary[k]]
-        r.line(f"clean turn, no challenge (saw: {', '.join(states) or 'connect only'})")
+        r.line(f"chat socket seen (saw: {', '.join(states) or 'connect only'})")
     else:
         r.line("no chat socket observed — was a message sent in the Copilot window?")
-    if summary["refreshed"]:
-        r.line("snapshotted a fresh session from this turn (token.json updated)")
-    elif summary["chat_open"]:
-        r.line("could not snapshot a token from the turn; token.json left unchanged")
-    return summary["refreshed"]
 
 
-def live_probe_section(r: Report, refreshed: bool) -> None:
+def live_probe_section(r: Report) -> None:
     r.section("Live chat probe (HTTP driver)")
-    if refreshed:
-        r.line("using the session just snapshotted from the browser turn")
     r.line("sending one short message (60s budget)...")
     started = time.time()
     try:
@@ -368,14 +308,13 @@ def main() -> None:
     playwright_section(r)
     session_section(r)
 
-    refreshed = False
     if args.report_only:
         r.section("Live protocol capture (browser)")
         r.line("skipped (--report-only)")
     else:
-        refreshed = browser_capture(r)
+        browser_capture(r)
 
-    live_probe_section(r, refreshed)
+    live_probe_section(r)
     log_tail_section(r, "login.log", LOGIN_LOG)
     log_tail_section(r, "ws_capture.log", WS_LOG)
 

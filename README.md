@@ -4,7 +4,7 @@
 
 ![Windows Copilot API — a free, OpenAI-compatible API for your Microsoft Copilot account](assets/windows-copilot-api-banner.png)
 
-**Using your own Microsoft Copilot account.** No API key, no credits, no paid plan: it turns the free chat at [copilot.microsoft.com](https://copilot.microsoft.com) into an API you can call from code.
+**Using your own Microsoft Copilot account.** No API key, no credits, no paid plan: it turns the free chat at [copilot.com](https://copilot.com) (formerly copilot.microsoft.com) into an API you can call from code.
 
 You can use it in two ways:
 
@@ -93,9 +93,9 @@ playwright install chromium
 python -m copilot login
 ```
 
-The browser **closes by itself** once sign-in is detected — you don't need to press Enter or close it manually. After sign-in it sends one short warm-up message that mints the chat token **and** passes Cloudflare's "verify you're human" check in the same step (a brief "finishing setup…" appears, and a tiny throwaway chat lands in your history). If a checkbox shows up, click it in that login window. The steps are logged to `session/login.log` if anything goes wrong. That's it: your session is saved under `session/` (git-ignored, never shared) and reused on every run — so your first request works right away.
+The browser **closes by itself** once sign-in is detected — you don't need to press Enter or close it manually. Choose **Yes** if Microsoft asks whether to stay signed in. The steps are logged to `session/login.log` if anything goes wrong. That's it: your token is saved under `session/` (git-ignored, never shared) and reused on every run. **After this, no browser is used:** chatting and token renewal are plain HTTP.
 
-> 🛠️ **Run into trouble during setup or your first run?** Head to the [Troubleshooting](#troubleshooting) section, the bundled diagnostic both *fixes* common issues (captcha/clearance) and *logs* a shareable report.
+> 🛠️ **Run into trouble during setup or your first run?** Head to the [Troubleshooting](#troubleshooting) section; the bundled diagnostic writes a shareable report.
 
 ---
 
@@ -103,7 +103,7 @@ The browser **closes by itself** once sign-in is detected — you don't need to 
 
 Prefer a container? You can run the OpenAI-compatible server in Docker once you've signed in.
 
-> **Sign in on the host first.** The login step above opens a *visible* browser, which can't run inside the headless container — so run `python -m copilot login` on your host to populate `session/`. The container mounts that folder and reuses the Cloudflare clearance earned on the host. It refreshes the chat token headlessly, but it can't earn *fresh* clearance without a visible browser, so when clearance expires (~30 min) it returns a `503` — re-run `python -m copilot login` on the host to refresh `session/`.
+> **Sign in on the host first.** The login step above opens a *visible* browser, which can't run inside the headless container — so run `python -m copilot login` on your host to populate `session/`. The container mounts that folder and renews the chat token over plain HTTP. If the refresh token itself expires, re-run `python -m copilot login` on the host.
 
 ```bash
 docker compose up --build
@@ -200,27 +200,21 @@ python -m copilot ask "Hello!"   # quick one-shot question
 
 ---
 
-## Cloudflare clearance (automatic)
+## How the session works
 
-Copilot's chat sits behind Cloudflare. Access needs a `cf_clearance` cookie,
-earned by passing a "verify you're human" check in a real browser, and it lasts
-about half an hour. The bridge handles this for you:
+Copilot moved from copilot.microsoft.com to **copilot.com**, which runs on the
+Microsoft 365 Copilot backend. The bridge talks to it directly over HTTP — a
+WebSocket to `substrate.office.com` (see [copilot/protocol.py](copilot/protocol.py)) —
+authenticated with your signed-in chat token:
 
-- **At sign-in:** `python -m copilot login` earns clearance as part of the same
-  warm-up that mints your token, so your first request works immediately. If
-  Cloudflare shows a checkbox, click it in the login window.
-- **When it expires:** if a later request hits the gate, the bridge opens a
-  browser, passes the check (the checkbox is clicked automatically, or you click
-  it if one appears), and retries the request for you. You'll see a short
-  `[copilot] clearance: …` progress log, then the answer.
-
-On a trusted connection the check often passes invisibly with no window at all. A
-datacenter/VPN IP is stricter and more likely to show the checkbox; a residential
-connection clears most reliably.
-
-The **server** never opens a window: when clearance expires it returns a `503`
-(`type: "clearance_required"`). Re-clear out of band with `python -m copilot
-login`, then retry.
+- **At sign-in:** `python -m copilot login` captures the chat token (valid ~8
+  hours) and a refresh token into `session/token.json`.
+- **When the token expires:** it's renewed over plain HTTP with the refresh
+  token, transparently, in well under a second.
+- **If the refresh token expires too:** the bridge re-mints it once from your
+  signed-in browser profile, headlessly; if that profile is signed out, run
+  `python -m copilot login` again. The **server** never opens a window: it
+  returns an error telling you to sign in.
 
 ---
 
@@ -302,7 +296,7 @@ add a few retries yourself.
 
 | Path | What it does |
 | --- | --- |
-| [copilot/](copilot/) | The core library: `CopilotClient`, auth, browser sign-in, HTTP driver |
+| [copilot/](copilot/) | The core library: `CopilotClient`, auth + token refresh, browser sign-in, HTTP driver, protocol |
 | [server/](server/) | The FastAPI OpenAI-compatible server |
 | [examples/](examples/) | Runnable examples for every feature ([examples/README.md](examples/README.md)) |
 | [tests/](tests/) | Test scripts: the concurrency stress test ([tests/stress.py](tests/stress.py)) and the diagnostic & report tool ([tests/diagnostic.py](tests/diagnostic.py)) |
@@ -312,47 +306,36 @@ add a few retries yourself.
 
 ## Notes & limitations
 
-- **Sign in once, then reuse.** The cached token refreshes automatically; you only re-sign-in if the session fully expires.
-- **No daily limit, but be reasonable.** Microsoft doesn't impose a daily chat cap, but please use it in moderation, and don't spam or hammer it with automated bulk requests.
+- **Sign in once, then reuse.** The cached token refreshes automatically over HTTP; you only re-sign-in if the session fully expires.
+- **Daily allowance.** The free copilot.com tier meters usage per day (the reply metadata shows a daily quota that resets at midnight UTC). Use it in moderation, and don't hammer it with automated bulk requests.
+- **Text only for now.** Image input isn't supported on the new copilot.com backend yet.
 - **One model.** Copilot has no model picker, so the server advertises a single model named `copilot`.
 - **Roughly GPT-4 class.** On GPQA Diamond (198 graduate-level questions, closed-book) it scores **40.9%**, which puts it in the GPT-4 family rather than the reasoning tier (o1/o3). Measured with [tests/gpqa_bench.py](tests/gpqa_bench.py).
-- **Your session is private.** Everything in `session/` (cookies + token) stays on your machine and is git-ignored.
+- **Your session is private.** Everything in `session/` (browser profile + tokens) stays on your machine and is git-ignored.
 
 ---
 
 ## Troubleshooting
 
-Cloudflare clearance is handled automatically (see above), so most "verify you're
-human" issues clear themselves. If a request still fails, run the diagnostic — it
-refreshes the session and writes a shareable report.
+If sign-in or requests fail, first re-run `python -m copilot login`. If that
+doesn't help, run the diagnostic — it writes a shareable report.
 
 ```bash
 python tests/diagnostic.py                # browser capture + report
 python tests/diagnostic.py --report-only  # headless/VPS: report only, no browser
 ```
 
-The default run opens your signed-in browser and asks you to send one short
-message. That single action:
-
-- **Refreshes clearance:** it drives a *real* browser on the same
-  `session/profile/` the bridge uses, so passing any "verify you're human" check
-  earns a fresh `cf_clearance` cookie, then snapshots the session (cookies +
-  token) into `session/token.json` for the pure-HTTP driver to adopt.
-- **Captures the protocol** to `session/ws_capture.log`. A clean turn goes
-  `setOptions` → `send` → `appendText…` → `done`; a `{"event":"challenge",
-  "method":"cloudflare",…}` frame means Cloudflare gated the turn.
+The default run opens a browser on the same `session/profile/` the bridge uses
+and asks you to send one short message; it captures the chat protocol to
+`session/ws_capture.log` (a clean turn shows `update` frames with
+`writeAtCursor` text, then a `"type":3` completion). That's what's needed to
+follow a protocol change on Microsoft's side.
 
 It also writes `session/diagnostic_report.txt` — environment, the *shape* of your
-session (cookie names + token length, never the values), a live chat probe, and
-redacted log tails. **Both files are safe to share:** access tokens, cookies,
-OAuth codes, and emails are redacted before anything is written. Attach
-`diagnostic_report.txt` to a GitHub issue (skim it first) and the cause is
-usually obvious.
-
-> On a headless **server/VPS** you can't open a browser, so clearance can't be
-> earned there — pass `--report-only`, and do the clearance step on a machine
-> with a display (or route traffic through a residential connection, e.g. a
-> home-PC exit node), since datacenter IPs are where Cloudflare is strictest.
+session (token presence/length/expiry, never the values), a live chat probe, and
+redacted log tails. Access tokens, cookies, OAuth codes, and emails are redacted
+before anything is written, but your message and the reply appear as plain text,
+so skim it before attaching it to a GitHub issue.
 
 ---
 

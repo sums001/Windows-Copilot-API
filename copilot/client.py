@@ -17,10 +17,9 @@ is the incremental variant.
     for chunk in client.stream("Tell me a joke"):  # new conversation, streamed
         print(chunk, end="", flush=True)
 
-The signed-in access token is refreshed transparently; sign in once with
-``python -m copilot login``. Pass ``anonymous=True`` to skip sign-in (only where
-anonymous consumer chat is available), or ``proxy=...`` to route through a
-supported region.
+The signed-in access token is refreshed transparently over HTTP; sign in once
+with ``python -m copilot login``. Pass ``proxy=...`` to route requests through a
+proxy.
 """
 
 import sys
@@ -29,7 +28,7 @@ from dataclasses import dataclass, field
 from typing import Generator, List, Optional, Union
 
 from .auth import AUTH_MAX_AGE, load_auth
-from .driver import ClearanceRequired, Copilot
+from .driver import AuthExpired, Copilot
 from .models import Conversation, ImageResponse
 
 
@@ -78,27 +77,19 @@ class CopilotClient:
     Parameters
     ----------
     anonymous:
-        Skip sign-in and talk to Copilot anonymously. Only works where the
-        anonymous consumer experience is available (it is geo-blocked in some
-        regions, e.g. India). Default ``False`` uses the signed-in session.
+        Not supported: copilot.com only chats when signed in. Kept so existing
+        callers passing ``anonymous=False`` keep working.
     proxy:
         Optional ``scheme://user:pass@host:port`` proxy, applied to both the
         auth refresh and every request.
     max_age:
         Seconds a cached access token is trusted before it is refreshed.
     interactive_clear:
-        When a turn is gated behind a Cloudflare Turnstile (expired
-        ``cf_clearance``), recover by opening a *visible* browser and refreshing
-        clearance there (the checkbox is auto-clicked, or a human clicks it), then
-        retry. Default ``True``. Set ``False`` for headless/server use, where a
-        :class:`~copilot.driver.ClearanceRequired` error is raised instead of
-        popping a window.
+        Allow opening a visible sign-in window when no usable session exists.
+        Default ``True``. Set ``False`` for headless/server use, where a
+        ``RuntimeError`` is raised instead of popping a window.
     headless_clear:
-        Attempt a *headless* clearance refresh before the visible one. Default
-        ``False``: headless Turnstile solving is unreliable on low-trust egress
-        (VPN/datacenter IPs) and a failed pass can leave a half-cleared state, so
-        the dependable path is a visible window. Enable once headless is proven on
-        your egress.
+        No effect; kept for compatibility with the previous version.
     """
 
     def __init__(
@@ -109,12 +100,12 @@ class CopilotClient:
         interactive_clear: bool = True,
         headless_clear: bool = False,
     ):
+        if anonymous:
+            raise ValueError("copilot.com requires sign-in; anonymous chat isn't available.")
         self._driver = Copilot()
-        self._anonymous = anonymous
         self._proxy = proxy
         self._max_age = max_age
         self._interactive_clear = interactive_clear
-        self._headless_clear = headless_clear
         self._auth: Optional[dict] = None
 
     def stream(
@@ -129,11 +120,9 @@ class CopilotClient:
         continues that conversation. Read ``.conversation_id`` on the returned
         stream (during/after iteration) to continue the chat later.
 
-        If the turn is gated behind a Cloudflare Turnstile (expired
-        ``cf_clearance``), it is transparently recovered: clearance is refreshed
-        in a visible browser (the checkbox is auto-clicked, or a human clicks it)
-        and the turn is retried. Recovery only happens before any text is emitted,
-        so output is never duplicated.
+        If the access token turns out to be rejected, it is refreshed and the
+        turn retried once. Recovery only happens before any text is emitted, so
+        output is never duplicated.
         """
         return ChatStream(
             self._stream_with_recovery(prompt, conversation_id, kwargs),
@@ -141,33 +130,14 @@ class CopilotClient:
         )
 
     def _stream_with_recovery(self, prompt, conversation_id, kwargs):
-        """Drive the turn, recovering from an expired-clearance Turnstile by
-        refreshing clearance in a browser and retrying.
-
-        Recovery opens a *visible* browser by default: headless solving is
-        unreliable on low-trust egress, so the dependable path is a real window
-        (auto-clicked checkbox, or a human click). A headless pre-pass runs only
-        when ``headless_clear`` is set. Recovery happens only before any text is
-        emitted, so output is never duplicated.
-        """
-        # Browser recovery passes, in order: a headless pre-pass (opt-in) then a
-        # visible window. Each entry is the ``headless`` flag for that pass.
-        strategies = []
-        if not self._anonymous:
-            if self._headless_clear:
-                strategies.append(True)
-            if self._interactive_clear:
-                strategies.append(False)
-        total = len(strategies) + 1  # +1 for the initial as-is attempt
-
-        for attempt in range(total):
-            auth = self._fresh_auth()
+        """Drive the turn; on a rejected token, refresh it and retry once."""
+        for attempt in range(2):
+            auth = self._fresh_auth(force=attempt > 0)
             kw = dict(
                 stream=True,
                 proxy=self._proxy,
-                cookies=auth["cookies"] if auth else None,
-                access_token=auth["access_token"] if auth else None,
-                identity_type=auth.get("identity_type") if auth else None,
+                access_token=auth["access_token"],
+                oid=auth["oid"],
                 **kwargs,
             )
             if conversation_id is None:
@@ -175,8 +145,6 @@ class CopilotClient:
             else:
                 kw["conversation_id"] = conversation_id
 
-            if attempt:
-                _status(f"Retrying the message (attempt {attempt + 1}/{total})...")
             produced = False  # any user-visible output yet? (Conversation doesn't count)
             try:
                 for item in self._driver.create_completion(prompt, **kw):
@@ -184,39 +152,10 @@ class CopilotClient:
                         produced = True
                     yield item
                 return
-            except ClearanceRequired:
-                if produced:
-                    _status("Cloudflare clearance expired mid-reply — can't recover "
-                            "without duplicating output; surfacing the error.")
+            except AuthExpired:
+                if produced or attempt:
                     raise
-                if attempt >= len(strategies):
-                    # No (more) recovery passes available — anonymous, server
-                    # (no visible browser), or the last pass already ran.
-                    _status("Cloudflare clearance could not be refreshed; giving up.")
-                    raise
-                self._refresh_clearance(headless=strategies[attempt])
-                self._auth = None  # force a reload of the freshly-snapshotted auth
-
-    def _refresh_clearance(self, headless: bool) -> None:
-        """Refresh Cloudflare clearance via a browser, re-snapshotting token.json.
-
-        Headless first (automatic when Cloudflare trusts the session); a visible
-        window second so a human can pass an escalated interactive checkbox.
-        """
-        from .browser import BrowserCopilot
-
-        if headless:
-            _status("Cloudflare clearance expired — attempting a headless refresh...")
-        else:
-            _status("Cloudflare clearance expired — opening a browser. "
-                    "Click the 'verify you're human' checkbox if it appears.")
-        bot = BrowserCopilot(headless=headless, proxy=self._proxy)
-        try:
-            earned = bot.auto_clear()
-        finally:
-            bot.close()
-        _status("Clearance refreshed." if earned
-                else "Browser did not earn fresh clearance.")
+                _status("Access token rejected — refreshing it and retrying...")
 
     def chat(
         self,
@@ -238,10 +177,12 @@ class CopilotClient:
                 images.append(item)
         return ChatReply("".join(text), s.conversation_id, images)
 
-    def _fresh_auth(self) -> Optional[dict]:
-        """Return current signed-in auth, refreshing it when stale (or None)."""
-        if self._anonymous:
-            return None
-        if self._auth is None or (time.time() - self._auth.get("saved_at", 0)) >= self._max_age:
-            self._auth = load_auth(max_age=self._max_age, proxy=self._proxy)
+    def _fresh_auth(self, force: bool = False) -> dict:
+        """Return current signed-in auth, refreshing it when stale or forced."""
+        now = time.time()
+        if (force or self._auth is None
+                or now - self._auth.get("saved_at", 0) >= self._max_age
+                or now >= self._auth.get("expires_at", 0) - 60):
+            self._auth = load_auth(max_age=self._max_age, proxy=self._proxy,
+                                   auto_login=self._interactive_clear, force=force)
         return self._auth

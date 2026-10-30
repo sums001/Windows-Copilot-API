@@ -21,17 +21,14 @@ from .ratelimit import TokenBucket
 from .schemas import ChatCompletionRequest
 
 app = FastAPI(title="Copilot OpenAI-compatible API", version="1.0.0")
-# Server runs headless and must never pop a visible browser mid-request. With
-# both recovery passes disabled, an expired clearance surfaces immediately as a
-# 503 (see ClearanceRequired handling below) so an operator can re-clear out of
-# band (`python -m copilot login`). Headless auto-solve is intentionally off:
-# it's unreliable on low-trust egress and a failed pass can wedge the session.
-client = CopilotClient(interactive_clear=False, headless_clear=False)
+# Server must never pop a visible browser mid-request: chat and token refresh
+# are plain HTTP, and if the session is gone entirely the request fails with a
+# message to run `python -m copilot login` out of band.
+client = CopilotClient(interactive_clear=False)
 
 _CLEARANCE_HELP = (
-    "Cloudflare clearance expired and could not be refreshed headlessly. "
-    "Re-clear in a browser: run `python -m copilot login` (or `python tests/diagnostic.py`) "
-    "and pass the 'verify you're human' check, then retry."
+    "Copilot asked for human verification before answering. Open copilot.com in "
+    "your browser, pass the check, then retry (or run `python -m copilot login`)."
 )
 
 # Self-imposed rate limit on top of the concurrency lock below: this caps
