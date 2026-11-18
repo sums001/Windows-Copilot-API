@@ -141,7 +141,13 @@ def _location_info() -> dict:
     }
 
 
-def chat_frame(text: str, request_id: str, session_id: str, start_of_session: bool) -> dict:
+def chat_frame(
+    text: str,
+    request_id: str,
+    session_id: str,
+    start_of_session: bool,
+    model: str = "Magic",
+) -> dict:
     """The ``chat`` invocation the web client sends for one user message."""
     client_info = _client_info(session_id)
     return {
@@ -177,7 +183,7 @@ def chat_frame(text: str, request_id: str, session_id: str, start_of_session: bo
             },
             "plugins": [{"Id": "BingWebSearch", "Source": "BuiltIn"}],
             "isSbsSupported": True,
-            "tone": "Magic",
+            "tone": model,
             "renderReferencesBehindEOS": True,
             "disconnectBehavior": "continue",
         }],

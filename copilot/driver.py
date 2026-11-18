@@ -64,6 +64,7 @@ class Copilot(AbstractProvider):
             access_token: str = None,
             oid: str = None,
             tenant: str = MSA_TENANT,
+            model: str = "Reasoning",
             **kwargs
         ):
         """Stream a Copilot reply to ``prompt``.
@@ -120,8 +121,9 @@ class Copilot(AbstractProvider):
                 raise
             wss.send(HANDSHAKE, CurlWsFlag.TEXT)
             wss.send(PING, CurlWsFlag.TEXT)
-            wss.send(encode(chat_frame(prompt, request_id, session_id, start_of_session)),
-                     CurlWsFlag.TEXT)
+            wss.send(encode(chat_frame(
+                prompt, request_id, session_id, start_of_session, model=model,
+            )), CurlWsFlag.TEXT)
             yield from self._read_stream(wss, timeout)
 
     def _read_stream(self, wss, timeout: int, idle_timeout: int = 90):

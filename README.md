@@ -19,21 +19,24 @@ You sign in once in a browser with your Microsoft **or Google** account; your se
 
 ## Table of contents
 
-- [Why use this?](#why-use-this)
-- [Requirements](#requirements)
-- [Setup (2 minutes)](#setup-2-minutes)
-- [Run with Docker (optional)](#run-with-docker-optional)
-- [Usage 1: In Python (no server)](#usage-1-in-python-no-server)
-- [Usage 2: As an OpenAI-compatible server](#usage-2-as-an-openai-compatible-server)
-- [Command line](#command-line)
-- [Concurrency & stress test](#concurrency--stress-test)
-- [Rate limiting](#rate-limiting)
-- [Project layout](#project-layout)
-- [Notes & limitations](#notes--limitations)
-- [Troubleshooting](#troubleshooting)
-- [Collaboration & support](#collaboration--support)
-- [License](#license)
-- [Star History](#star-history)
+- [Windows Copilot API: a free LLM API powered by Microsoft Copilot](#windows-copilot-api-a-free-llm-api-powered-by-microsoft-copilot)
+  - [Table of contents](#table-of-contents)
+  - [Why use this?](#why-use-this)
+  - [Requirements](#requirements)
+  - [Setup (2 minutes)](#setup-2-minutes)
+  - [Run with Docker (optional)](#run-with-docker-optional)
+  - [Usage 1: In Python (no server)](#usage-1-in-python-no-server)
+  - [Usage 2: As an OpenAI-compatible server](#usage-2-as-an-openai-compatible-server)
+  - [Command line](#command-line)
+  - [How the session works](#how-the-session-works)
+  - [Concurrency \& stress test](#concurrency--stress-test)
+  - [Rate limiting](#rate-limiting)
+  - [Project layout](#project-layout)
+  - [Notes \& limitations](#notes--limitations)
+  - [Troubleshooting](#troubleshooting)
+  - [Collaboration \& support](#collaboration--support)
+  - [License](#license)
+  - [Star History](#star-history)
 
 ---
 
@@ -178,12 +181,22 @@ curl http://localhost:8000/v1/chat/completions \
   -d '{"messages": [{"role": "user", "content": "Hello!"}]}'
 ```
 
+**Models**
+
+| API model id | Copilot mode |
+| --- | --- |
+| `copilot` | Auto (decides how long to think) |
+| `copilot-quick` | Quick response |
+| `copilot-reasoning` | Think deeper (default) |
+
+These are Copilot's routing/reasoning modes, not separately versioned public models. Pass the chosen id as `model` in either streaming or non-streaming requests.
+
 **Endpoints**
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | `/v1/chat/completions` | Chat (supports `"stream": true` and an optional `"conversation_id"`) |
-| `GET`  | `/v1/models` | Lists the single `copilot` model |
+| `POST` | `/v1/chat/completions` | Chat (supports `"stream": true`, model selection, and an optional `"conversation_id"`) |
+| `GET`  | `/v1/models` | Lists all selectable models |
 
 > Change the address with env vars: `HOST=0.0.0.0 PORT=8080 python app.py`, or run `uvicorn server.api:app --host 0.0.0.0 --port 8080`.
 
@@ -309,7 +322,8 @@ add a few retries yourself.
 - **Sign in once, then reuse.** The cached token refreshes automatically over HTTP; you only re-sign-in if the session fully expires.
 - **Daily allowance.** The free copilot.com tier meters usage per day (the reply metadata shows a daily quota that resets at midnight UTC). Use it in moderation, and don't hammer it with automated bulk requests.
 - **Text only for now.** Image input isn't supported on the new copilot.com backend yet.
-- **One model.** Copilot has no model picker, so the server advertises a single model named `copilot`.
+- **No tool calling.** OpenAI `tools`, `tool_calls`, and tool results aren't implemented. VS Code Agent therefore can't use this bridge to read or edit workspace files autonomously; use Ask mode with files attached explicitly instead.
+- **Three modes.** Choose `copilot` (Auto), `copilot-quick` (Quick response), or `copilot-reasoning` (Think deeper). These select Copilot's routing/reasoning mode rather than separately named public model versions.
 - **Roughly GPT-4 class.** On GPQA Diamond (198 graduate-level questions, closed-book) it scores **40.9%**, which puts it in the GPT-4 family rather than the reasoning tier (o1/o3). Measured with [tests/gpqa_bench.py](tests/gpqa_bench.py).
 - **Your session is private.** Everything in `session/` (browser profile + tokens) stays on your machine and is git-ignored.
 

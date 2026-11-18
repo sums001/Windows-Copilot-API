@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from copilot import CopilotClient
 from copilot.driver import ClearanceRequired
 
-from .config import MODEL_NAME, RATE_LIMIT_BURST, RATE_LIMIT_RPM
+from .config import MODEL_NAME, MODEL_TONES, RATE_LIMIT_BURST, RATE_LIMIT_RPM
 from .openai_format import (
     completion_response,
     new_id,
@@ -74,7 +74,9 @@ def _stream(prompt: str, model: str, conversation_id=None):
     try:
         with _upstream_lock:  # one upstream chat at a time (released on disconnect)
             yield sse_event(stream_chunk(cid, created, model, {"role": "assistant"}))
-            stream = client.stream(prompt, conversation_id=conversation_id)
+            stream = client.stream(
+                prompt, conversation_id=conversation_id, model=MODEL_TONES[model],
+            )
             for piece in stream:
                 if isinstance(piece, str) and piece:
                     yield sse_event(stream_chunk(cid, created, model, {"content": piece}))
@@ -102,7 +104,8 @@ def list_models():
     return {
         "object": "list",
         "data": [
-            {"id": MODEL_NAME, "object": "model", "created": 0, "owned_by": "microsoft"}
+            {"id": model, "object": "model", "created": 0, "owned_by": "microsoft"}
+            for model in MODEL_TONES
         ],
     }
 
@@ -116,6 +119,16 @@ def chat_completions(req: ChatCompletionRequest):
             content={"error": {"message": "no text content in messages", "type": "invalid_request_error"}},
         )
     model = req.model or MODEL_NAME
+    if model not in MODEL_TONES:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {
+                "message": f"Unknown model {model!r}; choose from: {', '.join(MODEL_TONES)}",
+                "type": "invalid_request_error",
+                "param": "model",
+                "code": "model_not_found",
+            }},
+        )
 
     # Enforce the per-minute ceiling before touching the upstream lock, so excess
     # callers get a fast 429 instead of piling up behind the serialized queue.
@@ -130,7 +143,9 @@ def chat_completions(req: ChatCompletionRequest):
 
     try:
         with _upstream_lock:  # serialize: one upstream chat at a time
-            reply = client.chat(prompt, conversation_id=req.conversation_id)
+            reply = client.chat(
+                prompt, conversation_id=req.conversation_id, model=MODEL_TONES[model],
+            )
     except ClearanceRequired:
         return JSONResponse(
             status_code=503,
