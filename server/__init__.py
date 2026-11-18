@@ -18,6 +18,7 @@ Code is split by concern:
     tools.py          prompt-based function calling and tool-call parsing
     workspace_tools.py file edits, creation/deletion, directories, PowerShell
     workspace_mcp.py  MCP stdio transport for VS Code workspace tools
+    vscode.py         SessionStart hook for workspace MCP registration
     openai_format.py  build OpenAI response/chunk shapes
     api.py            FastAPI app, routes, upstream serialization
 """

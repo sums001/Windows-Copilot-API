@@ -201,7 +201,15 @@ These are Copilot's routing/reasoning modes, not separately versioned public mod
 
 ### VS Code workspace tools (MCP)
 
-The included [.vscode/mcp.json](.vscode/mcp.json) registers a local MCP server with these Agent tools:
+Install the user-level session hook once from the project root:
+
+```bash
+python -m server.vscode --install-hook
+```
+
+After that, every new VS Code Agent session runs the hook automatically. VS Code supplies the current workspace as `cwd`; the hook creates `.vscode/mcp.json` only when that file is absent. An existing file is left untouched, and `app.py` needs no additional arguments. The hook is stored in `$COPILOT_HOME/hooks/` or `~/.copilot/hooks/` and uses the current Python environment's absolute executable.
+
+The registered `workspace-tools` server provides these Agent tools:
 
 | Tool | Capability |
 | --- | --- |
@@ -211,7 +219,7 @@ The included [.vscode/mcp.json](.vscode/mcp.json) registers a local MCP server w
 | `create_directory` | Create a directory and missing parent directories |
 | `powershell` | Run PowerShell with an optional workspace working directory and a 1–600 second timeout |
 
-Run **MCP: List Servers** in VS Code and start `workspace-tools`, then keep its tools enabled under **Configure Tools**. Keep `toolCalling: true` and `vision: false` in the custom model configuration. On Windows, `powershell` uses PowerShell 7 (`pwsh`) when available, otherwise Windows PowerShell (`powershell.exe`). Python must be available as `python` on PATH.
+Run **MCP: List Servers** in VS Code and start `workspace-tools`, then keep its tools enabled under **Configure Tools**. Keep `toolCalling: true` and `vision: false` in the custom model configuration. On Windows, `powershell` uses PowerShell 7 (`pwsh`) when available, otherwise Windows PowerShell (`powershell.exe`). Generated MCP configurations use the current Python executable's absolute path.
 
 File operations reject paths outside the workspace and refuse symlinks. PowerShell commands can make broader system changes, so review every VS Code approval prompt carefully. Disable unrelated MCP servers while testing to stay below VS Code's per-request tool limit.
 
