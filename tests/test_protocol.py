@@ -1,10 +1,8 @@
 """Tests for parsing Copilot chat protocol responses."""
 
-import os
 import unittest
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from copilot.protocol import TurnParser, _local_timezone_name
 
@@ -43,23 +41,20 @@ class LocationInfoTests(unittest.TestCase):
     def setUp(self):
         self.now = datetime(2026, 1, 1, tzinfo=timezone(timedelta(hours=8), "CST"))
 
-    def test_reads_iana_name_from_localtime(self):
-        with patch.dict(os.environ, {}, clear=True), \
-                patch("copilot.protocol.Path.resolve",
-                      return_value=Path("/var/db/timezone/zoneinfo/Asia/Shanghai")), \
-                patch("copilot.protocol.ZoneInfo") as zone_info:
-            self.assertEqual(_local_timezone_name(self.now), "Asia/Shanghai")
-            zone_info.assert_called_once_with("Asia/Shanghai")
+    def test_uses_iana_key_when_available(self):
+        now = Mock()
+        now.tzinfo.key = "Asia/Shanghai"
+        with patch("copilot.protocol.get_localzone_name") as localzone:
+            self.assertEqual(_local_timezone_name(now), "Asia/Shanghai")
+            localzone.assert_not_called()
 
-    def test_reads_iana_name_from_environment(self):
-        with patch.dict(os.environ, {"TZ": ":Asia/Shanghai"}, clear=True), \
-                patch("copilot.protocol.ZoneInfo"):
+    def test_uses_tzlocal_for_fixed_offset_timezone(self):
+        with patch("copilot.protocol.get_localzone_name", return_value="Asia/Shanghai") as localzone:
             self.assertEqual(_local_timezone_name(self.now), "Asia/Shanghai")
+            localzone.assert_called_once_with()
 
-    def test_rejects_abbreviations(self):
-        with patch.dict(os.environ, {"TZ": "CST"}, clear=True), \
-                patch("copilot.protocol.Path.resolve", return_value=Path("/etc/localtime")), \
-                patch("copilot.protocol.ZoneInfo", side_effect=ValueError):
+    def test_falls_back_to_utc_when_local_zone_is_unavailable(self):
+        with patch("copilot.protocol.get_localzone_name", side_effect=LookupError):
             self.assertEqual(_local_timezone_name(self.now), "UTC")
 
 
