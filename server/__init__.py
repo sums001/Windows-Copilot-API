@@ -15,6 +15,9 @@ Code is split by concern:
     config.py         constants
     schemas.py        pydantic request models
     prompt.py         flatten OpenAI messages -> one Copilot prompt
+    tools.py          prompt-based function calling and tool-call parsing
+    workspace_tools.py file edits, creation/deletion, directories, PowerShell
+    workspace_mcp.py  MCP stdio transport for VS Code workspace tools
     openai_format.py  build OpenAI response/chunk shapes
     api.py            FastAPI app, routes, upstream serialization
 """

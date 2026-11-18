@@ -19,24 +19,21 @@ You sign in once in a browser with your Microsoft **or Google** account; your se
 
 ## Table of contents
 
-- [Windows Copilot API: a free LLM API powered by Microsoft Copilot](#windows-copilot-api-a-free-llm-api-powered-by-microsoft-copilot)
-  - [Table of contents](#table-of-contents)
-  - [Why use this?](#why-use-this)
-  - [Requirements](#requirements)
-  - [Setup (2 minutes)](#setup-2-minutes)
-  - [Run with Docker (optional)](#run-with-docker-optional)
-  - [Usage 1: In Python (no server)](#usage-1-in-python-no-server)
-  - [Usage 2: As an OpenAI-compatible server](#usage-2-as-an-openai-compatible-server)
-  - [Command line](#command-line)
-  - [How the session works](#how-the-session-works)
-  - [Concurrency \& stress test](#concurrency--stress-test)
-  - [Rate limiting](#rate-limiting)
-  - [Project layout](#project-layout)
-  - [Notes \& limitations](#notes--limitations)
-  - [Troubleshooting](#troubleshooting)
-  - [Collaboration \& support](#collaboration--support)
-  - [License](#license)
-  - [Star History](#star-history)
+- [Why use this?](#why-use-this)
+- [Requirements](#requirements)
+- [Setup (2 minutes)](#setup-2-minutes)
+- [Run with Docker (optional)](#run-with-docker-optional)
+- [Usage 1: In Python (no server)](#usage-1-in-python-no-server)
+- [Usage 2: As an OpenAI-compatible server](#usage-2-as-an-openai-compatible-server)
+- [Command line](#command-line)
+- [Concurrency & stress test](#concurrency--stress-test)
+- [Rate limiting](#rate-limiting)
+- [Project layout](#project-layout)
+- [Notes & limitations](#notes--limitations)
+- [Troubleshooting](#troubleshooting)
+- [Collaboration & support](#collaboration--support)
+- [License](#license)
+- [Star History](#star-history)
 
 ---
 
@@ -195,12 +192,30 @@ These are Copilot's routing/reasoning modes, not separately versioned public mod
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | `/v1/chat/completions` | Chat (supports `"stream": true`, model selection, and an optional `"conversation_id"`) |
+| `POST` | `/v1/chat/completions` | Chat (supports streaming, model selection, function tools, and an optional `"conversation_id"`) |
 | `GET`  | `/v1/models` | Lists all selectable models |
 
 > Change the address with env vars: `HOST=0.0.0.0 PORT=8080 python app.py`, or run `uvicorn server.api:app --host 0.0.0.0 --port 8080`.
 
 👉 More: [examples/04_server_http.py](examples/04_server_http.py), [05_server_stream.py](examples/05_server_stream.py), [06_server_openai_sdk.py](examples/06_server_openai_sdk.py)
+
+### VS Code workspace tools (MCP)
+
+The included [.vscode/mcp.json](.vscode/mcp.json) registers a local MCP server with these Agent tools:
+
+| Tool | Capability |
+| --- | --- |
+| `edit_file` | Exact string replacement in an existing UTF-8 file |
+| `create_file` | Create a new file without overwriting existing content |
+| `delete_file` | Permanently delete one workspace file |
+| `create_directory` | Create a directory and missing parent directories |
+| `powershell` | Run PowerShell with an optional workspace working directory and a 1–600 second timeout |
+
+Run **MCP: List Servers** in VS Code and start `workspace-tools`, then keep its tools enabled under **Configure Tools**. Keep `toolCalling: true` and `vision: false` in the custom model configuration. On Windows, `powershell` uses PowerShell 7 (`pwsh`) when available, otherwise Windows PowerShell (`powershell.exe`). Python must be available as `python` on PATH.
+
+File operations reject paths outside the workspace and refuse symlinks. PowerShell commands can make broader system changes, so review every VS Code approval prompt carefully. Disable unrelated MCP servers while testing to stay below VS Code's per-request tool limit.
+
+For a Copilot harness instead of the Local harness, add the same server through **Chat: Open Customizations → MCP Servers → Add Server → Command (stdio)** with `python -m server.workspace_mcp --workspace <absolute-workspace-path>`.
 
 ---
 
@@ -322,7 +337,7 @@ add a few retries yourself.
 - **Sign in once, then reuse.** The cached token refreshes automatically over HTTP; you only re-sign-in if the session fully expires.
 - **Daily allowance.** The free copilot.com tier meters usage per day (the reply metadata shows a daily quota that resets at midnight UTC). Use it in moderation, and don't hammer it with automated bulk requests.
 - **Text only for now.** Image input isn't supported on the new copilot.com backend yet.
-- **No tool calling.** OpenAI `tools`, `tool_calls`, and tool results aren't implemented. VS Code Agent therefore can't use this bridge to read or edit workspace files autonomously; use Ask mode with files attached explicitly instead.
+- **Tool calling.** OpenAI function `tools`, streaming/non-streaming `tool_calls`, and `role=tool` results are supported. The parser handles `auto`/`none`/`required`/named tool choices, `parallel_tool_calls`, and normal text alongside calls. Copilot's consumer protocol has no native tool channel, so the bridge emulates it with constrained JSON rather than constrained decoding; for VS Code Agent set `toolCalling: true` and `vision: false`. VS Code still limits each request to 128 tools, so enable only the tools you need.
 - **Three modes.** Choose `copilot` (Auto), `copilot-quick` (Quick response), or `copilot-reasoning` (Think deeper). These select Copilot's routing/reasoning mode rather than separately named public model versions.
 - **Roughly GPT-4 class.** On GPQA Diamond (198 graduate-level questions, closed-book) it scores **40.9%**, which puts it in the GPT-4 family rather than the reasoning tier (o1/o3). Measured with [tests/gpqa_bench.py](tests/gpqa_bench.py).
 - **Your session is private.** Everything in `session/` (browser profile + tokens) stays on your machine and is git-ignored.

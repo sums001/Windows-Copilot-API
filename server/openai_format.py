@@ -10,13 +10,19 @@ def new_id() -> str:
     return f"chatcmpl-{uuid.uuid4().hex}"
 
 
-def completion_response(text: str, model: str, conversation_id=None) -> dict:
+def completion_response(text: str, model: str, conversation_id=None, tool_calls=None) -> dict:
     """A non-streaming ``chat.completion`` object.
 
     ``conversation_id`` is Copilot's own conversation id, surfaced as an extra
     top-level field (not part of OpenAI's schema, so standard clients ignore it)
     for callers that want to track the upstream thread.
     """
+    message = {
+        "role": "assistant",
+        "content": None if tool_calls and not text else text,
+    }
+    if tool_calls:
+        message["tool_calls"] = tool_calls
     return {
         "id": new_id(),
         "object": "chat.completion",
@@ -26,8 +32,8 @@ def completion_response(text: str, model: str, conversation_id=None) -> dict:
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": text},
-                "finish_reason": "stop",
+                "message": message,
+                "finish_reason": "tool_calls" if tool_calls else "stop",
             }
         ],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},

@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
-from copilot.protocol import TurnParser, _local_timezone_name
+from copilot.protocol import TurnParser, _local_timezone_name, chat_frame
 
 
 class TurnParserTests(unittest.TestCase):
@@ -56,6 +56,19 @@ class LocationInfoTests(unittest.TestCase):
     def test_falls_back_to_utc_when_local_zone_is_unavailable(self):
         with patch("copilot.protocol.get_localzone_name", side_effect=LookupError):
             self.assertEqual(_local_timezone_name(self.now), "UTC")
+
+
+class ChatFrameTests(unittest.TestCase):
+    def test_defaults_to_auto_mode(self):
+        frame = chat_frame("Hello", "request", "session", True)
+
+        self.assertEqual(frame["arguments"][0]["tone"], "Magic")
+
+    def test_sets_selected_model(self):
+        for model in ("Magic", "Chat", "Reasoning"):
+            with self.subTest(model=model):
+                frame = chat_frame("Hello", "request", "session", True, model=model)
+                self.assertEqual(frame["arguments"][0]["tone"], model)
 
 
 if __name__ == "__main__":
