@@ -22,9 +22,12 @@ protocol, recapture it and update this file.
 """
 
 import json
+import os
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import List, Optional, Union
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 CHATHUB_URL = "wss://substrate.office.com/m365Copilot/Chathub/{oid}@{tenant}"
 # Consumer (Microsoft account) users are routed through the MSA tenant.
@@ -119,12 +122,34 @@ def _client_info(session_id: str) -> dict:
     }
 
 
+def _local_timezone_name(now: datetime) -> str:
+    """Return the local IANA timezone name expected by Copilot."""
+    candidates = [
+        getattr(now.tzinfo, "key", None),
+        os.environ.get("TZ", "").lstrip(":"),
+    ]
+    try:
+        parts = Path("/etc/localtime").resolve().parts
+        candidates.append("/".join(parts[parts.index("zoneinfo") + 1:]))
+    except (OSError, RuntimeError, ValueError):
+        pass
+    for name in candidates:
+        if not name or name.startswith("/"):
+            continue
+        try:
+            ZoneInfo(name)
+        except (ZoneInfoNotFoundError, ValueError):
+            continue
+        return name
+    return "UTC"
+
+
 def _location_info() -> dict:
     now = datetime.now().astimezone()
     offset = now.utcoffset()
     return {
         "timeZoneOffset": offset.total_seconds() / 3600 if offset else 0,
-        "timeZone": now.tzname() or "UTC",
+        "timeZone": _local_timezone_name(now),
     }
 
 
@@ -242,8 +267,10 @@ class TurnParser:
             item = record.get("item") or {}
             self._note_conversation(item)
             result = item.get("result") or {}
-            if result.get("value") not in (None, "Success"):
-                self.error = result.get("message") or result.get("value")
+            value = result.get("value")
+            if value not in (None, "Success"):
+                message = result.get("message")
+                self.error = f"{value}: {message}" if message else str(value)
             replies = [m["text"] for m in item.get("messages") or [] if isinstance(m, dict) and _is_reply(m)]
             return self._sync(replies[-1]) if replies else []
         if kind == 3:  # invocation completion
