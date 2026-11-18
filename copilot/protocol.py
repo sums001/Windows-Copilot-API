@@ -26,6 +26,8 @@ import time
 from datetime import datetime
 from typing import List, Optional, Union
 
+from tzlocal import get_localzone_name
+
 CHATHUB_URL = "wss://substrate.office.com/m365Copilot/Chathub/{oid}@{tenant}"
 # Consumer (Microsoft account) users are routed through the MSA tenant.
 MSA_TENANT = "84df9e7f-e9f6-40af-b435-aaaaaaaaaaaa"
@@ -119,16 +121,33 @@ def _client_info(session_id: str) -> dict:
     }
 
 
+def _local_timezone_name(now: datetime) -> str:
+    """Return the local IANA timezone name expected by Copilot."""
+    key = getattr(now.tzinfo, "key", None)
+    if key:
+        return key
+    try:
+        return get_localzone_name()
+    except (LookupError, OSError, ValueError):
+        return "UTC"
+
+
 def _location_info() -> dict:
     now = datetime.now().astimezone()
     offset = now.utcoffset()
     return {
         "timeZoneOffset": offset.total_seconds() / 3600 if offset else 0,
-        "timeZone": now.tzname() or "UTC",
+        "timeZone": _local_timezone_name(now),
     }
 
 
-def chat_frame(text: str, request_id: str, session_id: str, start_of_session: bool) -> dict:
+def chat_frame(
+    text: str,
+    request_id: str,
+    session_id: str,
+    start_of_session: bool,
+    model: str = "Magic",
+) -> dict:
     """The ``chat`` invocation the web client sends for one user message."""
     client_info = _client_info(session_id)
     return {
@@ -164,7 +183,7 @@ def chat_frame(text: str, request_id: str, session_id: str, start_of_session: bo
             },
             "plugins": [{"Id": "BingWebSearch", "Source": "BuiltIn"}],
             "isSbsSupported": True,
-            "tone": "Magic",
+            "tone": model,
             "renderReferencesBehindEOS": True,
             "disconnectBehavior": "continue",
         }],
@@ -242,8 +261,10 @@ class TurnParser:
             item = record.get("item") or {}
             self._note_conversation(item)
             result = item.get("result") or {}
-            if result.get("value") not in (None, "Success"):
-                self.error = result.get("message") or result.get("value")
+            value = result.get("value")
+            if value not in (None, "Success"):
+                message = result.get("message")
+                self.error = f"{value}: {message}" if message else str(value)
             replies = [m["text"] for m in item.get("messages") or [] if isinstance(m, dict) and _is_reply(m)]
             return self._sync(replies[-1]) if replies else []
         if kind == 3:  # invocation completion

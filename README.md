@@ -178,16 +178,52 @@ curl http://localhost:8000/v1/chat/completions \
   -d '{"messages": [{"role": "user", "content": "Hello!"}]}'
 ```
 
+**Models**
+
+| API model id | Copilot mode |
+| --- | --- |
+| `copilot` | Auto (decides how long to think) |
+| `copilot-quick` | Quick response |
+| `copilot-reasoning` | Think deeper (default) |
+
+These are Copilot's routing/reasoning modes, not separately versioned public models. Pass the chosen id as `model` in either streaming or non-streaming requests.
+
 **Endpoints**
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | `/v1/chat/completions` | Chat (supports `"stream": true` and an optional `"conversation_id"`) |
-| `GET`  | `/v1/models` | Lists the single `copilot` model |
+| `POST` | `/v1/chat/completions` | Chat (supports streaming, model selection, function tools, and an optional `"conversation_id"`) |
+| `GET`  | `/v1/models` | Lists all selectable models |
 
 > Change the address with env vars: `HOST=0.0.0.0 PORT=8080 python app.py`, or run `uvicorn server.api:app --host 0.0.0.0 --port 8080`.
 
 👉 More: [examples/04_server_http.py](examples/04_server_http.py), [05_server_stream.py](examples/05_server_stream.py), [06_server_openai_sdk.py](examples/06_server_openai_sdk.py)
+
+### VS Code workspace tools (MCP)
+
+Install the user-level session hook once from the project root:
+
+```bash
+python -m server.vscode --install-hook
+```
+
+After that, every new VS Code Agent session runs the hook automatically. VS Code supplies the current workspace as `cwd`; the hook creates `.vscode/mcp.json` only when that file is absent. An existing file is left untouched, and `app.py` needs no additional arguments. The hook is stored in `$COPILOT_HOME/hooks/` or `~/.copilot/hooks/` and uses the current Python environment's absolute executable.
+
+The registered `workspace-tools` server provides these Agent tools:
+
+| Tool | Capability |
+| --- | --- |
+| `edit_file` | Exact string replacement in an existing UTF-8 file |
+| `create_file` | Create a new file without overwriting existing content |
+| `delete_file` | Permanently delete one workspace file |
+| `create_directory` | Create a directory and missing parent directories |
+| `powershell` | Run PowerShell with an optional workspace working directory and a 1–600 second timeout |
+
+Run **MCP: List Servers** in VS Code and start `workspace-tools`, then keep its tools enabled under **Configure Tools**. Keep `toolCalling: true` and `vision: false` in the custom model configuration. On Windows, `powershell` uses PowerShell 7 (`pwsh`) when available, otherwise Windows PowerShell (`powershell.exe`). Generated MCP configurations use the current Python executable's absolute path.
+
+File operations reject paths outside the workspace and refuse symlinks. PowerShell commands can make broader system changes, so review every VS Code approval prompt carefully. Disable unrelated MCP servers while testing to stay below VS Code's per-request tool limit.
+
+For a Copilot harness instead of the Local harness, add the same server through **Chat: Open Customizations → MCP Servers → Add Server → Command (stdio)** with `python -m server.workspace_mcp --workspace <absolute-workspace-path>`.
 
 ---
 
@@ -309,7 +345,8 @@ add a few retries yourself.
 - **Sign in once, then reuse.** The cached token refreshes automatically over HTTP; you only re-sign-in if the session fully expires.
 - **Daily allowance.** The free copilot.com tier meters usage per day (the reply metadata shows a daily quota that resets at midnight UTC). Use it in moderation, and don't hammer it with automated bulk requests.
 - **Text only for now.** Image input isn't supported on the new copilot.com backend yet.
-- **One model.** Copilot has no model picker, so the server advertises a single model named `copilot`.
+- **Tool calling.** OpenAI function `tools`, streaming/non-streaming `tool_calls`, and `role=tool` results are supported. The parser handles `auto`/`none`/`required`/named tool choices, `parallel_tool_calls`, and normal text alongside calls. Copilot's consumer protocol has no native tool channel, so the bridge emulates it with constrained JSON rather than constrained decoding; for VS Code Agent set `toolCalling: true` and `vision: false`. VS Code still limits each request to 128 tools, so enable only the tools you need.
+- **Three modes.** Choose `copilot` (Auto), `copilot-quick` (Quick response), or `copilot-reasoning` (Think deeper). These select Copilot's routing/reasoning mode rather than separately named public model versions.
 - **Roughly GPT-4 class.** On GPQA Diamond (198 graduate-level questions, closed-book) it scores **40.9%**, which puts it in the GPT-4 family rather than the reasoning tier (o1/o3). Measured with [tests/gpqa_bench.py](tests/gpqa_bench.py).
 - **Your session is private.** Everything in `session/` (browser profile + tokens) stays on your machine and is git-ignored.
 

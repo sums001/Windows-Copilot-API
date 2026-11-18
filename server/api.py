@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from copilot import CopilotClient
 from copilot.driver import ClearanceRequired
 
-from .config import MODEL_NAME, RATE_LIMIT_BURST, RATE_LIMIT_RPM
+from .config import MODEL_NAME, MODEL_TONES, RATE_LIMIT_BURST, RATE_LIMIT_RPM
 from .openai_format import (
     completion_response,
     new_id,
@@ -19,6 +19,7 @@ from .openai_format import (
 from .prompt import messages_to_prompt
 from .ratelimit import TokenBucket
 from .schemas import ChatCompletionRequest
+from .tools import FunctionCallParser, tools_enabled
 
 app = FastAPI(title="Copilot OpenAI-compatible API", version="1.0.0")
 # Server must never pop a visible browser mid-request: chat and token refresh
@@ -63,26 +64,50 @@ def _rate_limited_response():
 _upstream_lock = threading.Lock()
 
 
-def _stream(prompt: str, model: str, conversation_id=None):
+def _stream(
+    prompt: str,
+    model: str,
+    conversation_id=None,
+    tools=None,
+    tool_choice=None,
+    parallel_tool_calls: bool = True,
+):
     """Yield OpenAI ``chat.completion.chunk`` SSE events for ``prompt``.
 
-    ``conversation_id`` continues an existing Copilot thread; ``None`` starts a
-    fresh one (its id is emitted on the final chunk).
+    Tool-enabled turns are buffered so tool-call JSON is never leaked as text.
     """
     cid = new_id()
     created = int(time.time())
+    tool_mode = tools_enabled(tools, tool_choice)
     try:
         with _upstream_lock:  # one upstream chat at a time (released on disconnect)
             yield sse_event(stream_chunk(cid, created, model, {"role": "assistant"}))
-            stream = client.stream(prompt, conversation_id=conversation_id)
+            stream = client.stream(
+                prompt, conversation_id=conversation_id, model=MODEL_TONES[model],
+            )
+            buffered = []
+            finish = "stop"
             for piece in stream:
                 if isinstance(piece, str) and piece:
-                    yield sse_event(stream_chunk(cid, created, model, {"content": piece}))
+                    if tool_mode:
+                        buffered.append(piece)
+                    else:
+                        yield sse_event(stream_chunk(cid, created, model, {"content": piece}))
+            if tool_mode:
+                parsed = FunctionCallParser(
+                    tools, tool_choice, parallel_tool_calls,
+                ).parse_non_stream("".join(buffered))
+                if parsed.text:
+                    yield sse_event(stream_chunk(cid, created, model, {"content": parsed.text}))
+                if parsed.calls:
+                    deltas = [dict(call, index=index) for index, call in enumerate(parsed.calls)]
+                    yield sse_event(stream_chunk(cid, created, model, {"tool_calls": deltas}))
+                    finish = "tool_calls"
             # Copilot's conversation id is known once the stream has run; emit it
             # on the final chunk so callers can track the upstream thread.
             yield sse_event(
                 stream_chunk(
-                    cid, created, model, {}, finish="stop",
+                    cid, created, model, {}, finish=finish,
                     conversation_id=stream.conversation_id,
                 )
             )
@@ -102,20 +127,33 @@ def list_models():
     return {
         "object": "list",
         "data": [
-            {"id": MODEL_NAME, "object": "model", "created": 0, "owned_by": "microsoft"}
+            {"id": model, "object": "model", "created": 0, "owned_by": "microsoft"}
+            for model in MODEL_TONES
         ],
     }
 
 
 @app.post("/v1/chat/completions")
 def chat_completions(req: ChatCompletionRequest):
-    prompt = messages_to_prompt(req.messages)
+    prompt = messages_to_prompt(
+        req.messages, req.tools, req.tool_choice, req.parallel_tool_calls,
+    )
     if not prompt.strip():
         return JSONResponse(
             status_code=400,
             content={"error": {"message": "no text content in messages", "type": "invalid_request_error"}},
         )
     model = req.model or MODEL_NAME
+    if model not in MODEL_TONES:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {
+                "message": f"Unknown model {model!r}; choose from: {', '.join(MODEL_TONES)}",
+                "type": "invalid_request_error",
+                "param": "model",
+                "code": "model_not_found",
+            }},
+        )
 
     # Enforce the per-minute ceiling before touching the upstream lock, so excess
     # callers get a fast 429 instead of piling up behind the serialized queue.
@@ -125,12 +163,21 @@ def chat_completions(req: ChatCompletionRequest):
 
     if req.stream:
         return StreamingResponse(
-            _stream(prompt, model, req.conversation_id), media_type="text/event-stream"
+            _stream(
+                prompt, model, req.conversation_id, req.tools, req.tool_choice,
+                req.parallel_tool_calls,
+            ),
+            media_type="text/event-stream",
         )
 
     try:
         with _upstream_lock:  # serialize: one upstream chat at a time
-            reply = client.chat(prompt, conversation_id=req.conversation_id)
+            reply = client.chat(
+                prompt, conversation_id=req.conversation_id, model=MODEL_TONES[model],
+            )
+        parsed = FunctionCallParser(
+            req.tools, req.tool_choice, req.parallel_tool_calls,
+        ).parse_non_stream(reply.text)
     except ClearanceRequired:
         return JSONResponse(
             status_code=503,
@@ -141,7 +188,9 @@ def chat_completions(req: ChatCompletionRequest):
             status_code=502,
             content={"error": {"message": str(exc), "type": "upstream_error"}},
         )
-    return completion_response(reply.text, model, reply.conversation_id)
+    return completion_response(
+        parsed.text, model, reply.conversation_id, tool_calls=parsed.calls,
+    )
 
 
 @app.get("/")

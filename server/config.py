@@ -2,8 +2,13 @@
 
 import os
 
-# The single model id this bridge advertises (Copilot has no model selector).
-MODEL_NAME = "copilot"
+# Public OpenAI model ids mapped to Copilot's `tone` request field.
+MODEL_NAME = "copilot-reasoning"
+MODEL_TONES = {
+    "copilot": "Magic",
+    "copilot-quick": "Chat",
+    "copilot-reasoning": "Reasoning",
+}
 
 # Self-imposed rate limit (Copilot publishes none). Tune to whatever ceiling the
 # probe in tests/ratelimit.py shows your account tolerates.
